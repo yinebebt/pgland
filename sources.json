@@ -1,0 +1,13 @@
+{
+  "sources": [
+    {
+      "name": "openfda",
+      "event_type": "adverse_event",
+      "url": "https://api.fda.gov/drug/event.json?search=patient.reaction.reactionmeddrapt:%22headache%22&limit=5&sort=receivedate:asc",
+      "records_path": "results",
+      "id_field": "safetyreportid",
+      "time_field": "receivedate",
+      "time_layout": "20060102"
+    }
+  ]
+}
