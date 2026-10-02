@@ -1,4 +1,4 @@
-// Package httpapi is the HTTP surface: sync, push ingest, and reads.
+// Package httpapi is the HTTP surface: sync, push ingest, reads, and the dashboard.
 package httpapi
 
 import (
@@ -72,6 +72,7 @@ func Handler(c Config) http.Handler {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", a.dashboard)
 	mux.HandleFunc("GET /healthz", a.healthz)
 	mux.HandleFunc("GET /sources", a.listSources)
 	mux.HandleFunc("POST /sources/{name}/sync", a.sync)

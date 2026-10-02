@@ -2,7 +2,9 @@
 
 Land event data from any API in Postgres.
 
-pgland is one Go binary and a Postgres database. It pulls pages from HTTP JSON APIs you describe in a config file, accepts events pushed to it over HTTP, stores both in one `raw_events` table, and serves the events and daily counts as JSON.
+pgland is one Go binary and a Postgres database. It pulls pages from HTTP JSON APIs you describe in a config file, accepts events pushed to it over HTTP, stores both in one `raw_events` table, and serves the events and daily counts as JSON and on a built-in dashboard.
+
+![dashboard](docs/dashboard.png)
 
 ## Quick start
 
@@ -14,7 +16,7 @@ export DATABASE_URL='postgres://pgland:pgland@localhost:5432/pgland?sslmode=disa
 go run ./cmd/pgland
 ```
 
-Then sync the example source and read what it stored:
+Open <http://localhost:8080> and press **Sync** on `openfda`, or from the shell:
 
 ```bash
 curl -X POST localhost:8080/sources/openfda/sync
@@ -84,11 +86,12 @@ A sync writes its records and moves its cursor in one transaction. If the write 
 
 | method | path | |
 | --- | --- | --- |
+| `GET` | `/` | Dashboard. |
 | `GET` | `/healthz` | Database check and version. |
 | `GET` | `/sources` | Configured pull sources and their cursors. |
 | `POST` | `/sources/{name}/sync` | Fetch and store the next page. `409` if a sync of that source is already running. |
 | `POST` | `/events/{source}` | Push events. |
-| `GET` | `/events?source=&limit=` | Newest events first. `limit` defaults to 50, max 500. |
+| `GET` | `/events?source=&limit=&before=` | Newest events first. `limit` defaults to 50, max 500. For the next page, pass the response's `next_before` as `before`; it is `null` on the last page. |
 | `GET` | `/stats?days=` | Totals per source and type, and per-day counts for the `days` most recent days that have events. |
 
 ## Configuration

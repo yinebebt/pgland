@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgland</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #667085;
+    --line: #e4e7ec; --accent: #2563eb; --bad: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #171a21; --text: #e6e8eb; --muted: #98a2b3;
+      --line: #2a2f3a; --accent: #6ea8fe; --bad: #f97066;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--text); background: var(--bg); }
+
+  header { display: flex; align-items: baseline; gap: 12px; padding: 20px 28px; background: var(--card); border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 20px; }
+  #status { margin-left: auto; }
+
+  main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; max-width: 1180px; margin: 0 auto; padding: 24px 28px 48px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { grid-column: 1 / -1; padding: 18px 20px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  section.half { grid-column: auto; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+
+  .muted { color: var(--muted); }
+  .error { color: var(--bad); }
+  .big { font-size: 36px; font-weight: 650; line-height: 1.1; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 6px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  code, pre { font: 12px/1.45 ui-monospace, Menlo, monospace; }
+  .cursor { display: block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  pre { max-height: 260px; margin: 6px 0 0; padding: 10px; overflow: auto; background: var(--bg); border-radius: 6px; }
+
+  button, select { font: inherit; border-radius: 6px; }
+  button { padding: 4px 12px; color: var(--accent); background: none; border: 1px solid var(--accent); cursor: pointer; }
+  button:hover { color: var(--card); background: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; }
+  select { padding: 3px 6px; color: var(--text); background: var(--card); border: 1px solid var(--line); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; font-size: 12px; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; background: var(--c); }
+  svg text { font-size: 11px; fill: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>pgland</h1>
+  <span class="muted" id="version"></span>
+  <span class="error" id="status" role="status"></span>
+</header>
+
+<main>
+  <section class="half">
+    <div class="head"><h2>Events stored</h2></div>
+    <div class="big" id="total">–</div>
+    <div class="muted" id="pairs"></div>
+  </section>
+
+  <section class="half">
+    <div class="head"><h2>Pull sources</h2></div>
+    <table>
+      <thead><tr><th>Source</th><th>Last sync</th><th></th></tr></thead>
+      <tbody id="sources"></tbody>
+    </table>
+    <div class="muted" id="sync-result" role="status"></div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Events per day</h2></div>
+    <div id="chart"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section>
+    <div class="head"><h2>By source and type</h2></div>
+    <table>
+      <thead><tr><th>Source</th><th>Type</th><th class="num">Events</th><th>First</th><th>Last</th></tr></thead>
+      <tbody id="by-type"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="head">
+      <h2>Latest events</h2>
+      <select id="filter" aria-label="Filter by source"><option value="">All sources</option></select>
+    </div>
+    <table>
+      <thead><tr><th>ID</th><th>Source</th><th>Type</th><th>External ID</th><th>Occurred</th></tr></thead>
+      <tbody id="events"></tbody>
+    </table>
+    <div class="pager">
+      <button type="button" id="newer">Newer</button>
+      <span class="muted" id="page"></span>
+      <button type="button" id="older">Older</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const STATS_DAYS = 60;
+const PAGE_SIZE = 10;
+const CHART = { width: 1100, height: 220, pad: 28, axis: 24 };
+const PALETTE = ["#2563eb", "#16a34a", "#ea580c", "#9333ea", "#0891b2", "#db2777", "#ca8a04", "#4b5563"];
+
+// ---- DOM helpers. Text is always added as text nodes, never parsed as HTML.
+
+const $ = (id) => document.getElementById(id);
+
+function make(ns, tag, attrs = {}, ...children) {
+  const node = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  node.append(...children.flat().map((c) => (c instanceof Node ? c : String(c ?? ""))));
+  return node;
+}
+const h = (tag, attrs, ...children) => make(null, tag, attrs, ...children);
+const svg = (tag, attrs, ...children) => make("http://www.w3.org/2000/svg", tag, attrs, ...children);
+
+const cell = (c) => (c instanceof HTMLTableCellElement ? c : h("td", {}, c));
+const row = (...cells) => h("tr", {}, ...cells.map(cell));
+const numCell = (n) => h("td", { class: "num" }, n.toLocaleString());
+
+function fillTable(id, rows, emptyText) {
+  const tbody = $(id);
+  const columns = tbody.closest("table").tHead.rows[0].cells.length;
+  tbody.replaceChildren(...(rows.length ? rows : [row(h("td", { colspan: columns, class: "muted" }, emptyText))]));
+}
+
+function say(id, text, isError = false) {
+  $(id).className = isError ? "error" : "muted";
+  $(id).textContent = text;
+}
+
+const fmtDay = (ts) => (ts ? ts.slice(0, 10) : "–");
+const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString() : "–");
+
+const colors = new Map();
+function colorFor(source) {
+  if (!colors.has(source)) colors.set(source, PALETTE[colors.size % PALETTE.length]);
+  return colors.get(source);
+}
+
+// ---- API
+
+async function api(path, options) {
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch {
+    throw new Error("pgland is not reachable. Is the server running?");
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+  return body;
+}
+
+// ---- Cards
+
+function renderSources(sources) {
+  fillTable("sources", sources.map((s) => row(
+    [h("strong", {}, s.name), h("code", { class: "cursor muted", title: s.cursor }, s.cursor || "not synced yet")],
+    fmtTime(s.synced_at),
+    syncButton(s.name),
+  )), "No pull sources. Add them to sources.json.");
+}
+
+function syncButton(name) {
+  const button = h("button", { type: "button" }, "Sync");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const res = await api(`/sources/${encodeURIComponent(name)}/sync`, { method: "POST" });
+      await refresh();
+      say("sync-result", `${name}: fetched ${res.fetched}`);
+    } catch (err) {
+      say("sync-result", `${name}: ${err.message}`, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function renderStats(stats) {
+  $("total").textContent = stats.total.toLocaleString();
+  $("pairs").textContent = `${stats.by_type.length} source/type pairs`;
+  fillTable("by-type", stats.by_type.map((t) => row(
+    t.source, t.event_type, numCell(t.count), fmtDay(t.first), fmtDay(t.last),
+  )), "No events yet.");
+  renderChart(stats.daily);
+  addFilterOptions(stats.by_type.map((t) => t.source));
+}
+
+// Stacked bars: one column per day, one segment per source.
+function renderChart(daily) {
+  const { width, height, pad, axis } = CHART;
+  const days = [...new Set(daily.map((d) => d.day))];
+  const sources = [...new Set(daily.map((d) => d.source))];
+  $("legend").replaceChildren(...sources.map((s) => h("span", { style: `--c:${colorFor(s)}` }, s)));
+  if (!days.length) {
+    $("chart").replaceChildren(h("div", { class: "muted" }, "No events yet."));
+    return;
+  }
+
+  const totals = new Map(days.map((d) => [d, 0]));
+  for (const d of daily) totals.set(d.day, totals.get(d.day) + d.count);
+  const peak = Math.max(...totals.values());
+  const scale = (height - 20) / peak;
+  const slot = (width - pad) / days.length;
+  const barWidth = Math.max(2, Math.min(36, slot * 0.7));
+  const labelEvery = Math.ceil(days.length / 10);
+  const stacked = new Map(days.map((d) => [d, 0]));
+
+  const bars = daily.map((d) => {
+    const i = days.indexOf(d.day);
+    const barHeight = d.count * scale;
+    stacked.set(d.day, stacked.get(d.day) + barHeight);
+    return svg("rect", {
+      x: pad + i * slot + (slot - barWidth) / 2,
+      y: height - stacked.get(d.day),
+      width: barWidth,
+      height: Math.max(barHeight, 1),
+      rx: 2,
+      fill: colorFor(d.source),
+    }, svg("title", {}, `${d.day} · ${d.source}: ${d.count}`));
+  });
+  const dayLabels = days
+    .map((d, i) => (i % labelEvery ? null : svg("text", { x: pad + i * slot + slot / 2, y: height + 18, "text-anchor": "middle" }, d)))
+    .filter(Boolean);
+
+  $("chart").replaceChildren(svg("svg", { viewBox: `0 0 ${width} ${height + axis}`, width: "100%", role: "img", "aria-label": "Events per day" },
+    svg("text", { x: 0, y: 12 }, peak),
+    dayLabels,
+    bars,
+  ));
+}
+
+function addFilterOptions(sources) {
+  const filter = $("filter");
+  const known = new Set([...filter.options].map((o) => o.value));
+  for (const s of new Set(sources)) {
+    if (!known.has(s)) filter.append(h("option", { value: s }, s));
+  }
+}
+
+// Pages are keyed by id: cursors holds the "before" value of each page visited,
+// with 0 for the newest page, so Newer pops and Older pushes next_before.
+let cursors = [0];
+let nextBefore = null;
+
+async function loadEvents() {
+  const params = new URLSearchParams({ limit: PAGE_SIZE });
+  if ($("filter").value) params.set("source", $("filter").value);
+  if (cursors.at(-1)) params.set("before", cursors.at(-1));
+  const page = await api(`/events?${params}`);
+  nextBefore = page.next_before;
+
+  fillTable("events", page.events.map((e) => row(
+    e.id,
+    e.source,
+    e.event_type,
+    h("details", {}, h("summary", {}, e.external_id), h("pre", {}, JSON.stringify(e.payload, null, 2))),
+    fmtDay(e.occurred_at),
+  )), "No events yet.");
+  $("page").textContent = `Page ${cursors.length}`;
+  $("newer").disabled = cursors.length === 1;
+  $("older").disabled = nextBefore === null;
+}
+
+function showPage(newCursors) {
+  cursors = newCursors;
+  return guarded(loadEvents);
+}
+
+// ---- Page
+
+async function guarded(load) {
+  try {
+    await load();
+    say("status", "");
+  } catch (err) {
+    say("status", err.message, true);
+  }
+}
+
+function refresh() {
+  cursors = [0];
+  return guarded(async () => {
+    const [{ sources }, stats] = await Promise.all([api("/sources"), api(`/stats?days=${STATS_DAYS}`), loadEvents()]);
+    renderSources(sources);
+    renderStats(stats);
+  });
+}
+
+$("filter").addEventListener("change", () => showPage([0]));
+$("newer").addEventListener("click", () => showPage(cursors.slice(0, -1)));
+$("older").addEventListener("click", () => showPage([...cursors, nextBefore]));
+api("/healthz").then((health) => { $("version").textContent = `v${health.version}`; }).catch(() => {});
+refresh();
+</script>
+</body>
+</html>

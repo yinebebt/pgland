@@ -63,12 +63,12 @@ func (m *memStore) SyncStates(context.Context) ([]store.SyncState, error) {
 
 func (m *memStore) Events(_ context.Context, f store.Filter) ([]store.Event, error) {
 	out := []store.Event{}
-	for i, key := range m.order {
-		rec := m.events[key]
-		if f.Source != "" && rec.Source != f.Source {
+	for i := len(m.order) - 1; i >= 0 && len(out) < f.Limit; i-- {
+		rec, id := m.events[m.order[i]], int64(i+1)
+		if (f.Source != "" && rec.Source != f.Source) || (f.Before != 0 && id >= f.Before) {
 			continue
 		}
-		out = append(out, store.Event{ID: int64(i + 1), Source: rec.Source, ExternalID: rec.ExternalID, EventType: rec.EventType, Payload: rec.Payload})
+		out = append(out, store.Event{ID: id, Source: rec.Source, ExternalID: rec.ExternalID, EventType: rec.EventType, Payload: rec.Payload})
 	}
 	return out, nil
 }
@@ -243,10 +243,52 @@ func TestIngestTwiceKeepsOneEvent(t *testing.T) {
 	}
 }
 
-func TestHealth(t *testing.T) {
+func TestListEventsPages(t *testing.T) {
 	t.Parallel()
 	h := newTestHandler(newMemStore(), "")
-	rec := do(t, h, http.MethodGet, "/healthz", nil, nil)
+	do(t, h, http.MethodPost, "/events/app", []byte(`[
+		{"id":"a","type":"t","data":{}},
+		{"id":"b","type":"t","data":{}},
+		{"id":"c","type":"t","data":{}}
+	]`), nil)
+
+	type page struct {
+		Events     []store.Event `json:"events"`
+		NextBefore *int64        `json:"next_before"`
+	}
+	get := func(path string) page {
+		t.Helper()
+		var p page
+		if err := json.Unmarshal(do(t, h, http.MethodGet, path, nil, nil).Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	ids := func(p page) (out []string) {
+		for _, e := range p.Events {
+			out = append(out, e.ExternalID)
+		}
+		return out
+	}
+
+	first := get("/events?limit=2")
+	if got := ids(first); len(got) != 2 || got[0] != "c" || got[1] != "b" || first.NextBefore == nil {
+		t.Fatalf("first page = %v, next_before %v", got, first.NextBefore)
+	}
+	last := get("/events?limit=2&before=" + strconv.FormatInt(*first.NextBefore, 10))
+	if got := ids(last); len(got) != 1 || got[0] != "a" || last.NextBefore != nil {
+		t.Fatalf("last page = %v, next_before %v", got, last.NextBefore)
+	}
+}
+
+func TestDashboardAndHealth(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(newMemStore(), "")
+	rec := do(t, h, http.MethodGet, "/", nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>pgland</title>") {
+		t.Fatalf("dashboard status = %d", rec.Code)
+	}
+	rec = do(t, h, http.MethodGet, "/healthz", nil, nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"version":"test"`) {
 		t.Fatalf("healthz = %d %s", rec.Code, rec.Body)
 	}

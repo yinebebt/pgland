@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -79,16 +80,25 @@ func (a *api) ingest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"source": name, "accepted": len(recs)})
 }
 
+// listEvents pages newest first. next_before is the before value for the
+// following page, or null on the last page.
 func (a *api) listEvents(w http.ResponseWriter, r *http.Request) {
+	limit := intParam(r, "limit", 50, 500)
 	events, err := a.store.Events(r.Context(), store.Filter{
 		Source: r.URL.Query().Get("source"),
-		Limit:  intParam(r, "limit", 50, 500),
+		Before: int64(intParam(r, "before", 0, math.MaxInt)),
+		Limit:  limit + 1,
 	})
 	if err != nil {
 		a.fail(w, r, http.StatusInternalServerError, "list events failed", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	var nextBefore *int64
+	if len(events) > limit {
+		events = events[:limit]
+		nextBefore = &events[limit-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events, "next_before": nextBefore})
 }
 
 func validSignature(secret, body []byte, header string) bool {

@@ -22,9 +22,11 @@ type Event struct {
 	IngestedAt time.Time       `json:"ingested_at"`
 }
 
-// Filter narrows Events. An empty Source matches every source.
+// Filter narrows Events. An empty Source matches every source, and a zero
+// Before means no upper bound on id.
 type Filter struct {
 	Source string
+	Before int64
 	Limit  int
 }
 
@@ -41,8 +43,9 @@ const listEventsSQL = `
 SELECT id, source, external_id, event_type, payload, occurred_at, ingested_at
 FROM raw_events
 WHERE ($1 = '' OR source = $1)
+  AND ($2 = 0 OR id < $2)
 ORDER BY id DESC
-LIMIT $2`
+LIMIT $3`
 
 // Save upserts recs on (source, external_id, event_type).
 // A repeated record keeps its row id and ingested_at, and an unchanged one
@@ -61,7 +64,7 @@ func (s *Store) Save(ctx context.Context, recs []event.Record) error {
 
 // Events returns the newest rows first.
 func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
-	rows, err := s.pool.Query(ctx, listEventsSQL, f.Source, f.Limit)
+	rows, err := s.pool.Query(ctx, listEventsSQL, f.Source, f.Before, f.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}

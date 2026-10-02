@@ -59,6 +59,10 @@ func TestSaveIsIdempotent(t *testing.T) {
 	if compact(t, updated.Payload) != `{"n":2}` {
 		t.Fatalf("payload = %s", updated.Payload)
 	}
+	older, err := st.Events(ctx, Filter{Source: "store-save", Before: got[0].ID, Limit: 10})
+	if err != nil || len(older) != 1 || older[0].ID != updated.ID {
+		t.Fatalf("before %d = %+v, err %v", got[0].ID, older, err)
+	}
 
 	before := rowVersion(t, st, updated.ID)
 	if err := st.Save(ctx, []event.Record{rec}); err != nil {

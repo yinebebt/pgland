@@ -9,7 +9,7 @@ pull:  sources.json ──► POST /sources/{name}/sync ──► fetch one page
                                                                        ├─► raw_events (upsert)
 push:  any client ────► POST /events/{source} ────► validate, verify ──┘        │
                                                                                 ▼
-                                                                         /events  /stats
+                                                                  /events  /stats  dashboard
 ```
 
 Both paths produce `event.Record` values and write them through the same upsert. Nothing is transformed on the way in. Derived tables, when they exist, are rebuilt from `raw_events`.
@@ -23,7 +23,7 @@ Both paths produce `event.Record` values and write them through the same upsert.
 | `internal/event` | `Record` and its validation. |
 | `internal/source` | Config-driven HTTP JSON pull source. `Link: rel="next"` paging. |
 | `internal/store` | Postgres pool, embedded `schema.sql`, upsert, cursors, stats. |
-| `internal/httpapi` | Routes, push signature check. |
+| `internal/httpapi` | Routes, push signature check, embedded dashboard. |
 
 ## Data model
 
@@ -66,7 +66,7 @@ APIs that page in the response body (a `next` field or token) are not supported 
 
 ## Analytics
 
-`GET /stats` groups by source and type, and by UTC day on `coalesce(occurred_at, ingested_at)`. For deeper analysis, point Grafana, Metabase, or plain SQL at the same database.
+`GET /stats` groups by source and type, and by UTC day on `coalesce(occurred_at, ingested_at)`. The dashboard at `/` is one embedded HTML file that calls these JSON endpoints, with no build step and no dependencies. For deeper analysis, point Grafana, Metabase, or plain SQL at the same database.
 
 ## Roadmap
 
