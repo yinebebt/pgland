@@ -1,4 +1,4 @@
-// Package store persists events and sync cursors in Postgres.
+// Package store persists events, sync cursors, and sync runs in Postgres.
 package store
 
 import (
@@ -15,7 +15,7 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// Store reads and writes events and cursors in Postgres.
+// Store reads and writes events, cursors, and sync runs in Postgres.
 type Store struct {
 	pool *pgxpool.Pool
 }

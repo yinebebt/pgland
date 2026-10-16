@@ -95,7 +95,7 @@ func create(ctx context.Context, client *sqs.Client, name string, attrs map[stri
 }
 
 // withEndpointHost keeps the queue path and uses the configured endpoint host.
-// LocalStack often returns localhost.localstack.cloud, which this process cannot call.
+// CreateQueue often returns a different host than the one the client was given.
 func withEndpointHost(endpoint, queueURL string) string {
 	base, err := url.Parse(endpoint)
 	got, err2 := url.Parse(queueURL)

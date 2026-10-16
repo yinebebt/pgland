@@ -56,6 +56,10 @@ CREATE TABLE sync_runs (
     accepted_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz
 );
+
+CREATE UNIQUE INDEX sync_runs_one_accepted
+    ON sync_runs (source)
+    WHERE status = 'accepted';
 ```
 
 The schema is `internal/store/schema.sql`, applied on start with `CREATE TABLE IF NOT EXISTS`. A new table is a new statement there. Changing an existing column needs a migration; one is added when a released schema first has to change in place.
