@@ -14,3 +14,17 @@ CREATE TABLE IF NOT EXISTS sync_state (
     cursor    text        NOT NULL,
     synced_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id          uuid        PRIMARY KEY,
+    source      text        NOT NULL,
+    status      text        NOT NULL CHECK (status IN ('accepted', 'finished', 'failed')),
+    fetched     integer,
+    error       text,
+    accepted_at timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS sync_runs_one_accepted
+    ON sync_runs (source)
+    WHERE status = 'accepted';

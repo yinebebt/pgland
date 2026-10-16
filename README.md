@@ -9,8 +9,16 @@ pgland is one Go binary and a Postgres database. It pulls pages from HTTP JSON A
 Requires Go 1.26 and Docker.
 
 ```bash
+docker compose -f ../infra/docker/localstack.yaml up -d
 docker compose up -d --wait
 export DATABASE_URL='postgres://pgland:pgland@localhost:5432/pgland?sslmode=disable'
+export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+go run ./cmd/pgland worker
+```
+
+In another shell, with the same environment:
+
+```bash
 go run ./cmd/pgland
 ```
 
@@ -18,6 +26,7 @@ Then sync the example source and read what it stored:
 
 ```bash
 curl -X POST localhost:8080/sources/openfda/sync
+curl localhost:8080/sources/openfda/syncs/<id>
 curl 'localhost:8080/events?source=openfda&limit=5'
 ```
 
@@ -54,7 +63,9 @@ Pull sources live in `sources.json` (or the file in `SOURCES_FILE`). The shipped
 | `time_field` | Optional dot path to the event time. |
 | `time_layout` | Go time layout for `time_field`. Default RFC 3339. |
 
-`POST /sources/{name}/sync` fetches one page. When the response has a `Link: <...>; rel="next"` header, that URL is saved as the cursor and the next sync starts there. With no next link, the cursor stays on the current page, so the next sync re-reads it and picks up anything appended. Next links to a host other than the one in `url` are ignored.
+`POST /sources/{name}/sync` accepts one page fetch and returns `202` with the run id. A worker reads the queue, calls the source, and stores the page. `GET /sources/{name}/syncs/{id}` shows `accepted`, `finished`, or `failed`. A second accept while one run for that source is still `accepted` returns `409`. A fetch that keeps failing is retried, then the message sits on the dead-letter queue and the run is `failed`.
+
+When the response has a `Link: <...>; rel="next"` header, that URL is saved as the cursor and the next sync starts there. With no next link, the cursor stays on the current page, so the next sync re-reads it and picks up anything appended. Next links to a host other than the one in `url` are ignored.
 
 ## Push events
 
@@ -86,7 +97,8 @@ A sync writes its records and moves its cursor in one transaction. If the write 
 | --- | --- | --- |
 | `GET` | `/healthz` | Database check and version. |
 | `GET` | `/sources` | Configured pull sources and their cursors. |
-| `POST` | `/sources/{name}/sync` | Fetch and store the next page. `409` if a sync of that source is already running. |
+| `POST` | `/sources/{name}/sync` | Accept the next page fetch. `202` with the run. `409` if that source already has an accepted run. |
+| `GET` | `/sources/{name}/syncs/{id}` | Accepted, finished, or failed. |
 | `POST` | `/events/{source}` | Push events. |
 | `GET` | `/events?source=&limit=` | Newest events first. `limit` defaults to 50, max 500. |
 | `GET` | `/stats?days=` | Totals per source and type, and per-day counts for the `days` most recent days that have events. |
@@ -101,6 +113,13 @@ A sync writes its records and moves its cursor in one transaction. If the write 
 | `SHUTDOWN_TIMEOUT` | `10s` | Grace period for in-flight requests. |
 | `SOURCES_FILE` | `sources.json` | Pull sources. A missing file means none. |
 | `INGEST_SECRET` | empty | Require signed pushes when set. |
+| `AWS_ENDPOINT_URL` | required | SQS endpoint. LocalStack is `http://localhost:4566`. |
+| `AWS_REGION` | `us-east-1` | Queue region. |
+| `AWS_ACCESS_KEY_ID` | required | Queue credentials. |
+| `AWS_SECRET_ACCESS_KEY` | required | Queue credentials. |
+| `QUEUE_NAME` | `pgland-sync` | Main sync queue. |
+| `DLQ_NAME` | `pgland-sync-dlq` | Dead-letter queue. |
+| `QUEUE_VISIBILITY_SECONDS` | `60` | How long a received run stays hidden. |
 
 The schema is `internal/store/schema.sql`, applied on every start with `CREATE TABLE IF NOT EXISTS`. Query `raw_events` directly from any SQL or BI tool.
 

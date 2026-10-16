@@ -14,12 +14,20 @@ import (
 	"github.com/yinebebt/pgland/internal/config"
 	"github.com/yinebebt/pgland/internal/httpapi"
 	"github.com/yinebebt/pgland/internal/source"
+	"github.com/yinebebt/pgland/internal/sqsqueue"
 	"github.com/yinebebt/pgland/internal/store"
 )
 
 var version = "0.1.0"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		if err := runWorker(); err != nil {
+			slog.Error("fatal", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -54,6 +62,11 @@ func run() error {
 	}
 	defer st.Close()
 
+	q, err := openQueue(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
 	if cfg.IngestSecret == "" {
 		log.Warn("INGEST_SECRET is empty; POST /events accepts unsigned requests")
 	}
@@ -63,6 +76,7 @@ func run() error {
 		Handler: httpapi.Handler(httpapi.Config{
 			Log:          log,
 			Store:        st,
+			Queue:        q,
 			Sources:      pullers,
 			IngestSecret: cfg.IngestSecret,
 			Version:      version,
@@ -91,4 +105,16 @@ func run() error {
 	}
 	log.Info("shutdown complete")
 	return nil
+}
+
+func openQueue(ctx context.Context, cfg config.Config) (*sqsqueue.Queue, error) {
+	return sqsqueue.Open(ctx, sqsqueue.Config{
+		Endpoint:          cfg.QueueEndpoint,
+		Region:            cfg.QueueRegion,
+		AccessKey:         cfg.QueueAccessKey,
+		SecretKey:         cfg.QueueSecretKey,
+		QueueName:         cfg.QueueName,
+		DLQName:           cfg.DLQName,
+		VisibilitySeconds: cfg.QueueVisibility,
+	})
 }

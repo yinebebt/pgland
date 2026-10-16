@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/yinebebt/pgland/internal/event"
 	"github.com/yinebebt/pgland/internal/source"
@@ -18,11 +17,17 @@ import (
 type Store interface {
 	Ping(ctx context.Context) error
 	Save(ctx context.Context, recs []event.Record) error
-	SaveSync(ctx context.Context, source string, recs []event.Record, cursor string) error
-	Cursor(ctx context.Context, source string) (string, error)
 	SyncStates(ctx context.Context) ([]store.SyncState, error)
+	AcceptSync(ctx context.Context, id, source string) error
+	GetSync(ctx context.Context, id string) (store.SyncRun, error)
+	FailSync(ctx context.Context, id, reason string) error
 	Events(ctx context.Context, f store.Filter) ([]store.Event, error)
 	Stats(ctx context.Context, days int) (store.Stats, error)
+}
+
+// Enqueuer publishes an accepted sync run for a worker.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, runID string) error
 }
 
 // Puller fetches one page of a pull source.
@@ -35,6 +40,7 @@ type Puller interface {
 type Config struct {
 	Log     *slog.Logger
 	Store   Store
+	Queue   Enqueuer
 	Sources []Puller
 	// IngestSecret, when set, requires a valid signature on POST /events/{source}.
 	IngestSecret string
@@ -44,17 +50,11 @@ type Config struct {
 type api struct {
 	log     *slog.Logger
 	store   Store
-	sources map[string]*pullSource
+	queue   Enqueuer
+	sources map[string]Puller
 	names   []string
 	secret  []byte
 	version string
-}
-
-// pullSource serializes syncs of one source so concurrent calls do not
-// fetch the same page twice.
-type pullSource struct {
-	Puller
-	mu sync.Mutex
 }
 
 // Handler returns the service's routes.
@@ -62,12 +62,13 @@ func Handler(c Config) http.Handler {
 	a := &api{
 		log:     c.Log,
 		store:   c.Store,
-		sources: make(map[string]*pullSource, len(c.Sources)),
+		queue:   c.Queue,
+		sources: make(map[string]Puller, len(c.Sources)),
 		secret:  []byte(c.IngestSecret),
 		version: c.Version,
 	}
 	for _, src := range c.Sources {
-		a.sources[src.Name()] = &pullSource{Puller: src}
+		a.sources[src.Name()] = src
 		a.names = append(a.names, src.Name())
 	}
 
@@ -75,6 +76,7 @@ func Handler(c Config) http.Handler {
 	mux.HandleFunc("GET /healthz", a.healthz)
 	mux.HandleFunc("GET /sources", a.listSources)
 	mux.HandleFunc("POST /sources/{name}/sync", a.sync)
+	mux.HandleFunc("GET /sources/{name}/syncs/{id}", a.getSync)
 	mux.HandleFunc("POST /events/{source}", a.ingest)
 	mux.HandleFunc("GET /events", a.listEvents)
 	mux.HandleFunc("GET /stats", a.stats)

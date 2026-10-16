@@ -5,7 +5,7 @@ pgland lands event data from many systems in one Postgres table, keeps it raw, a
 ## Data flow
 
 ```
-pull:  sources.json ──► POST /sources/{name}/sync ──► fetch one page ──┐
+pull:  sources.json ──► POST /sources/{name}/sync ──► queue ──► worker fetches one page ──┐
                                                                        ├─► raw_events (upsert)
 push:  any client ────► POST /events/{source} ────► validate, verify ──┘        │
                                                                                 ▼
@@ -18,12 +18,14 @@ Both paths produce `event.Record` values and write them through the same upsert.
 
 | package | role |
 | --- | --- |
-| `cmd/pgland` | Wires config, store, sources, and the HTTP server. Graceful shutdown. |
+| `cmd/pgland` | Wires config, store, sources, the HTTP server, and the sync worker. |
 | `internal/config` | Environment variables. |
 | `internal/event` | `Record` and its validation. |
 | `internal/source` | Config-driven HTTP JSON pull source. `Link: rel="next"` paging. |
-| `internal/store` | Postgres pool, embedded `schema.sql`, upsert, cursors, stats. |
-| `internal/httpapi` | Routes, push signature check. |
+| `internal/sqsqueue` | Sync queue and its dead-letter queue. |
+| `internal/syncjob` | One accepted pull: cursor, one page, store. |
+| `internal/store` | Postgres pool, embedded `schema.sql`, upsert, cursors, sync runs, stats. |
+| `internal/httpapi` | Routes and push signature check. |
 
 ## Data model
 
@@ -44,6 +46,20 @@ CREATE TABLE sync_state (
     cursor    text        NOT NULL,
     synced_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE sync_runs (
+    id          uuid        PRIMARY KEY,
+    source      text        NOT NULL,
+    status      text        NOT NULL,
+    fetched     integer,
+    error       text,
+    accepted_at timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz
+);
+
+CREATE UNIQUE INDEX sync_runs_one_accepted
+    ON sync_runs (source)
+    WHERE status = 'accepted';
 ```
 
 The schema is `internal/store/schema.sql`, applied on start with `CREATE TABLE IF NOT EXISTS`. A new table is a new statement there. Changing an existing column needs a migration; one is added when a released schema first has to change in place.
@@ -52,7 +68,7 @@ The schema is `internal/store/schema.sql`, applied on start with `CREATE TABLE I
 
 - Every write is `INSERT ... ON CONFLICT (source, external_id, event_type) DO UPDATE` on payload and occurred_at, skipped when neither changed. Retries, repeated pushes, and re-read pages converge on one row without rewriting it.
 - A sync writes its page and moves its cursor in one transaction. The cursor never runs ahead of stored events.
-- One sync per source runs at a time. A second call while one is running gets `409`, so the same page is not fetched twice. The lock is in-process; with several pgland replicas, the upsert still keeps the result correct.
+- One accepted sync run per source, enforced by a partial unique index. A second accept gets `409`. A run that is no longer accepted is not fetched again.
 
 ## Pull paging
 
