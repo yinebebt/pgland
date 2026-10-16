@@ -1,8 +1,13 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/yinebebt/pgland/internal/store"
 )
 
 type sourceView struct {
@@ -32,38 +37,66 @@ func (a *api) listSources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sources": views})
 }
 
-// sync fetches the page after the saved cursor and stores it with the new cursor.
+// sync accepts one page fetch. The worker performs it and the caller reads the run.
 func (a *api) sync(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	src, ok := a.sources[name]
-	if !ok {
+	if _, ok := a.sources[name]; !ok {
 		a.fail(w, r, http.StatusNotFound, "unknown source", nil)
 		return
 	}
-	if !src.mu.TryLock() {
-		a.fail(w, r, http.StatusConflict, "sync already running", nil)
+	if a.queue == nil {
+		a.fail(w, r, http.StatusServiceUnavailable, "queue not configured", nil)
 		return
 	}
-	defer src.mu.Unlock()
-	ctx := r.Context()
-	cursor, err := a.store.Cursor(ctx, name)
+	id, err := newRunID()
 	if err != nil {
-		a.fail(w, r, http.StatusInternalServerError, "read cursor failed", err)
+		a.fail(w, r, http.StatusInternalServerError, "accept sync failed", err)
 		return
 	}
-	page, err := src.Fetch(ctx, cursor)
+	if err := a.store.AcceptSync(r.Context(), id, name); err != nil {
+		if errors.Is(err, store.ErrSyncInProgress) {
+			a.fail(w, r, http.StatusConflict, "sync already running", nil)
+			return
+		}
+		a.fail(w, r, http.StatusInternalServerError, "accept sync failed", err)
+		return
+	}
+	if err := a.queue.Enqueue(r.Context(), id); err != nil {
+		if failErr := a.store.FailSync(r.Context(), id, "enqueue failed"); failErr != nil {
+			a.fail(w, r, http.StatusInternalServerError, "enqueue sync failed", errors.Join(err, failErr))
+			return
+		}
+		a.fail(w, r, http.StatusBadGateway, "enqueue sync failed", err)
+		return
+	}
+	run, err := a.store.GetSync(r.Context(), id)
 	if err != nil {
-		a.fail(w, r, http.StatusBadGateway, "source fetch failed", err)
+		a.fail(w, r, http.StatusInternalServerError, "read sync failed", err)
 		return
 	}
-	if err := a.store.SaveSync(ctx, name, page.Records, page.Next); err != nil {
-		a.fail(w, r, http.StatusInternalServerError, "save failed", err)
+	a.log.InfoContext(r.Context(), "sync accepted", "source", name, "run", id)
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (a *api) getSync(w http.ResponseWriter, r *http.Request) {
+	run, err := a.store.GetSync(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrSyncNotFound) || (err == nil && run.Source != r.PathValue("name")) {
+		a.fail(w, r, http.StatusNotFound, "sync run not found", nil)
 		return
 	}
-	a.log.InfoContext(ctx, "sync complete", "source", name, "fetched", len(page.Records))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"source":  name,
-		"fetched": len(page.Records),
-		"cursor":  page.Next,
-	})
+	if err != nil {
+		a.fail(w, r, http.StatusInternalServerError, "read sync failed", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func newRunID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("new sync id: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }

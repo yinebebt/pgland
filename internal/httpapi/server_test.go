@@ -7,11 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +22,11 @@ import (
 )
 
 type memStore struct {
-	events  map[string]event.Record
-	order   []string
-	cursors map[string]string
+	events   map[string]event.Record
+	order    []string
+	cursors  map[string]string
+	runs     map[string]store.SyncRun
+	accepted map[string]string
 }
 
 func newMemStore() *memStore {
@@ -42,15 +44,6 @@ func (m *memStore) Save(_ context.Context, recs []event.Record) error {
 		m.events[key] = rec
 	}
 	return nil
-}
-
-func (m *memStore) SaveSync(ctx context.Context, src string, recs []event.Record, cursor string) error {
-	m.cursors[src] = cursor
-	return m.Save(ctx, recs)
-}
-
-func (m *memStore) Cursor(_ context.Context, src string) (string, error) {
-	return m.cursors[src], nil
 }
 
 func (m *memStore) SyncStates(context.Context) ([]store.SyncState, error) {
@@ -77,32 +70,66 @@ func (m *memStore) Stats(context.Context, int) (store.Stats, error) {
 	return store.Stats{Total: int64(len(m.events)), ByType: []store.TypeCount{}, Daily: []store.DayCount{}}, nil
 }
 
-// pagedSource returns one record per call with Next set to "page-<n+1>",
-// and records each cursor it was asked for.
-type pagedSource struct {
-	asked []string
+func (m *memStore) AcceptSync(_ context.Context, id, source string) error {
+	if m.runs == nil {
+		m.runs = map[string]store.SyncRun{}
+		m.accepted = map[string]string{}
+	}
+	if _, ok := m.accepted[source]; ok {
+		return store.ErrSyncInProgress
+	}
+	m.runs[id] = store.SyncRun{ID: id, Source: source, Status: store.SyncAccepted, AcceptedAt: time.Now()}
+	m.accepted[source] = id
+	return nil
 }
 
-func (p *pagedSource) Name() string { return "feed" }
+func (m *memStore) GetSync(_ context.Context, id string) (store.SyncRun, error) {
+	run, ok := m.runs[id]
+	if !ok {
+		return store.SyncRun{}, store.ErrSyncNotFound
+	}
+	return run, nil
+}
 
-func (p *pagedSource) Fetch(_ context.Context, cursor string) (source.Page, error) {
-	p.asked = append(p.asked, cursor)
-	n := len(p.asked)
-	return source.Page{
-		Records: []event.Record{{
-			Source:     "feed",
-			ExternalID: "item-" + strconv.Itoa(n),
-			EventType:  "item",
-			Payload:    json.RawMessage(`{}`),
-		}},
-		Next: "page-" + strconv.Itoa(n+1),
-	}, nil
+func (m *memStore) FailSync(_ context.Context, id, reason string) error {
+	run, ok := m.runs[id]
+	if !ok {
+		return nil
+	}
+	delete(m.accepted, run.Source)
+	run.Status = store.SyncFailed
+	run.Error = reason
+	m.runs[id] = run
+	return nil
+}
+
+type memQueue struct {
+	ids  []string
+	fail bool
+}
+
+func (q *memQueue) Enqueue(_ context.Context, id string) error {
+	if q.fail {
+		return errors.New("queue down")
+	}
+	q.ids = append(q.ids, id)
+	return nil
+}
+
+// namedSource is a pull source the handler must not fetch itself.
+type namedSource struct{}
+
+func (namedSource) Name() string { return "feed" }
+
+func (namedSource) Fetch(context.Context, string) (source.Page, error) {
+	return source.Page{}, errors.New("handler fetched a page")
 }
 
 func newTestHandler(st Store, secret string, sources ...Puller) http.Handler {
 	return Handler(Config{
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Store:        st,
+		Queue:        &memQueue{},
 		Sources:      sources,
 		IngestSecret: secret,
 		Version:      "test",
@@ -120,55 +147,62 @@ func do(t *testing.T, h http.Handler, method, path string, body []byte, header h
 	return rec
 }
 
-func TestSyncResumesFromSavedCursor(t *testing.T) {
+func TestSyncAcceptsOntoTheQueue(t *testing.T) {
 	t.Parallel()
 	st := newMemStore()
-	src := &pagedSource{}
-	h := newTestHandler(st, "", src)
+	q := &memQueue{}
+	h := Handler(Config{
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:   st,
+		Queue:   q,
+		Sources: []Puller{namedSource{}},
+		Version: "test",
+	})
 
-	for range 2 {
-		if rec := do(t, h, http.MethodPost, "/sources/feed/sync", nil, nil); rec.Code != http.StatusOK {
-			t.Fatalf("sync status = %d body %s", rec.Code, rec.Body)
-		}
+	rec := do(t, h, http.MethodPost, "/sources/feed/sync", nil, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body)
 	}
-	if len(src.asked) != 2 || src.asked[0] != "" || src.asked[1] != "page-2" {
-		t.Fatalf("cursors asked = %q", src.asked)
+	var run store.SyncRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
 	}
-	if len(st.events) != 2 || st.cursors["feed"] != "page-3" {
-		t.Fatalf("events = %d, cursor = %q", len(st.events), st.cursors["feed"])
+	if run.Status != store.SyncAccepted || run.Source != "feed" || len(q.ids) != 1 || q.ids[0] != run.ID {
+		t.Fatalf("run %+v queue %v", run, q.ids)
 	}
-}
-
-// blockingSource holds Fetch open until release is closed.
-type blockingSource struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func (b *blockingSource) Name() string { return "slow" }
-
-func (b *blockingSource) Fetch(context.Context, string) (source.Page, error) {
-	close(b.started)
-	<-b.release
-	return source.Page{Next: "next"}, nil
+	got := do(t, h, http.MethodGet, "/sources/feed/syncs/"+run.ID, nil, nil)
+	if got.Code != http.StatusOK {
+		t.Fatalf("get status = %d", got.Code)
+	}
 }
 
 func TestSyncRejectsConcurrentRun(t *testing.T) {
 	t.Parallel()
-	src := &blockingSource{started: make(chan struct{}), release: make(chan struct{})}
-	h := newTestHandler(newMemStore(), "", src)
-
-	first := make(chan int)
-	go func() {
-		first <- do(t, h, http.MethodPost, "/sources/slow/sync", nil, nil).Code
-	}()
-	<-src.started
-	if rec := do(t, h, http.MethodPost, "/sources/slow/sync", nil, nil); rec.Code != http.StatusConflict {
-		t.Errorf("concurrent sync status = %d, want 409", rec.Code)
+	st := newMemStore()
+	h := newTestHandler(st, "", namedSource{})
+	if rec := do(t, h, http.MethodPost, "/sources/feed/sync", nil, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d", rec.Code)
 	}
-	close(src.release)
-	if code := <-first; code != http.StatusOK {
-		t.Fatalf("first sync status = %d", code)
+	if rec := do(t, h, http.MethodPost, "/sources/feed/sync", nil, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("second status = %d, want 409", rec.Code)
+	}
+}
+
+func TestSyncEnqueueFailureReleasesTheSource(t *testing.T) {
+	t.Parallel()
+	st := newMemStore()
+	h := Handler(Config{
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:   st,
+		Queue:   &memQueue{fail: true},
+		Sources: []Puller{namedSource{}},
+		Version: "test",
+	})
+	if rec := do(t, h, http.MethodPost, "/sources/feed/sync", nil, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if _, ok := st.accepted["feed"]; ok {
+		t.Fatal("accepted run left behind after enqueue failure")
 	}
 }
 
