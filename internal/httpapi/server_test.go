@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/yinebebt/pgland/internal/event"
-	"github.com/yinebebt/pgland/internal/source"
 	"github.com/yinebebt/pgland/internal/store"
 )
 
@@ -70,17 +69,18 @@ func (m *memStore) Stats(context.Context, int) (store.Stats, error) {
 	return store.Stats{Total: int64(len(m.events)), ByType: []store.TypeCount{}, Daily: []store.DayCount{}}, nil
 }
 
-func (m *memStore) AcceptSync(_ context.Context, id, source string) error {
+func (m *memStore) AcceptSync(_ context.Context, id, source string) (time.Time, error) {
 	if m.runs == nil {
 		m.runs = map[string]store.SyncRun{}
 		m.accepted = map[string]string{}
 	}
 	if _, ok := m.accepted[source]; ok {
-		return store.ErrSyncInProgress
+		return time.Time{}, store.ErrSyncInProgress
 	}
-	m.runs[id] = store.SyncRun{ID: id, Source: source, Status: store.SyncAccepted, AcceptedAt: time.Now()}
+	acceptedAt := time.Now().UTC()
+	m.runs[id] = store.SyncRun{ID: id, Source: source, Status: store.SyncAccepted, AcceptedAt: acceptedAt}
 	m.accepted[source] = id
-	return nil
+	return acceptedAt, nil
 }
 
 func (m *memStore) GetSync(_ context.Context, id string) (store.SyncRun, error) {
@@ -116,14 +116,10 @@ func (q *memQueue) Enqueue(_ context.Context, id string) error {
 	return nil
 }
 
-// namedSource is a pull source the handler must not fetch itself.
+// namedSource is a configured pull source. The handler only reads its name.
 type namedSource struct{}
 
 func (namedSource) Name() string { return "feed" }
-
-func (namedSource) Fetch(context.Context, string) (source.Page, error) {
-	return source.Page{}, errors.New("handler fetched a page")
-}
 
 func newTestHandler(st Store, secret string, sources ...Puller) http.Handler {
 	return Handler(Config{

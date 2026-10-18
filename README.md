@@ -2,7 +2,7 @@
 
 Land event data from any API in Postgres.
 
-pgland is one Go binary and a Postgres database. It pulls pages from HTTP JSON APIs you describe in a config file, accepts events pushed to it over HTTP, stores both in one `raw_events` table, and serves the events and daily counts as JSON.
+pgland is one Go binary and a Postgres database. It pulls batches from HTTP JSON APIs you describe in a config file, accepts events pushed to it over HTTP, stores both in one `raw_events` table, and serves the events and daily counts as JSON.
 
 ## Quick start
 
@@ -30,6 +30,8 @@ curl localhost:8080/sources/openfda/syncs/<id>
 curl 'localhost:8080/events?source=openfda&limit=5'
 ```
 
+The worker must already be running. Each `POST` enqueues one run id and returns `202`. The worker fetches that one batch. Call `POST` again for the next batch. The saved cursor is where that next call starts.
+
 Each sync stores the next five FDA drug adverse-event reports. Every row's `external_id` is the FDA `safetyreportid`, so you can look any report up at `https://api.fda.gov/drug/event.json?search=safetyreportid:"<id>"`.
 
 ## Pull sources
@@ -56,16 +58,16 @@ Pull sources live in `sources.json` (or the file in `SOURCES_FILE`). The shipped
 | --- | --- |
 | `name` | Source name, `[a-z0-9_-]`, used in URLs and rows. |
 | `event_type` | Stored on every record from this source. |
-| `url` | First page. |
+| `url` | Start URL. The first batch is fetched from here. |
 | `headers` | Optional request headers. Values expand `$VAR` from the environment, so tokens stay out of the file. |
 | `records_path` | Dot path to the array of records in the response, e.g. `data.items`. Empty if the body is the array. |
 | `id_field` | Dot path to each record's unique id. String or number. |
 | `time_field` | Optional dot path to the event time. |
 | `time_layout` | Go time layout for `time_field`. Default RFC 3339. |
 
-`POST /sources/{name}/sync` accepts one page fetch and returns `202` with the run id. A worker reads the queue, calls the source, and stores the page. `GET /sources/{name}/syncs/{id}` shows `accepted`, `finished`, or `failed`. A second accept while one run for that source is still `accepted` returns `409`. A fetch that keeps failing is retried, then the message sits on the dead-letter queue and the run is `failed`.
+`POST /sources/{name}/sync` does not fetch the batch. It inserts one `accepted` run, puts that run id on the queue, and returns `202`. The worker, already polling the queue, receives that one message, calls the source, and stores the batch. `GET /sources/{name}/syncs/{id}` shows `accepted`, `finished`, or `failed`. A second accept while one run for that source is still `accepted` returns `409`. How a failed fetch is retried, and when it lands on the dead-letter queue, is in [docs/design.md](docs/design.md).
 
-When the response has a `Link: <...>; rel="next"` header, that URL is saved as the cursor and the next sync starts there. With no next link, the cursor stays on the current page, so the next sync re-reads it and picks up anything appended. Next links to a host other than the one in `url` are ignored.
+An HTTP source's batch is one response page. When the response has a `Link: <...>; rel="next"` header, that URL is saved as the cursor and the next sync starts there. With no next link, the cursor stays on the current page, so the next sync re-reads it and picks up anything appended. Next links to a host other than the one in `url` are ignored.
 
 ## Push events
 
@@ -87,7 +89,7 @@ curl -X POST localhost:8080/events/myapp -H "X-Pgland-Signature: sha256=$SIG" -d
 
 ## Duplicates
 
-Every record is upserted on `(source, external_id, event_type)`. Sending the same event twice, retrying a push, or re-reading a page leaves one row. The row keeps its `id` and `ingested_at`; `payload` and `occurred_at` take the latest values.
+Every record is upserted on `(source, external_id, event_type)`. Sending the same event twice, retrying a push, or re-reading a batch leaves one row. The row keeps its `id` and `ingested_at`; `payload` and `occurred_at` take the latest values.
 
 A sync writes its records and moves its cursor in one transaction. If the write fails, the cursor stays where it was.
 
@@ -97,7 +99,7 @@ A sync writes its records and moves its cursor in one transaction. If the write 
 | --- | --- | --- |
 | `GET` | `/healthz` | Database check and version. |
 | `GET` | `/sources` | Configured pull sources and their cursors. |
-| `POST` | `/sources/{name}/sync` | Accept the next page fetch. `202` with the run. `409` if that source already has an accepted run. |
+| `POST` | `/sources/{name}/sync` | Accept the next batch. `202` with the run. `409` if that source already has an accepted run. |
 | `GET` | `/sources/{name}/syncs/{id}` | Accepted, finished, or failed. |
 | `POST` | `/events/{source}` | Push events. |
 | `GET` | `/events?source=&limit=` | Newest events first. `limit` defaults to 50, max 500. |
@@ -105,28 +107,13 @@ A sync writes its records and moves its cursor in one transaction. If the write 
 
 ## Configuration
 
-| variable | default | |
-| --- | --- | --- |
-| `DATABASE_URL` | required | Postgres connection string. |
-| `HTTP_ADDR` | `:8080` | Listen address. |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
-| `SHUTDOWN_TIMEOUT` | `10s` | Grace period for in-flight requests. |
-| `SOURCES_FILE` | `sources.json` | Pull sources. A missing file means none. |
-| `INGEST_SECRET` | empty | Require signed pushes when set. |
-| `AWS_ENDPOINT_URL` | required | SQS endpoint. LocalStack is `http://localhost:4566`. |
-| `AWS_REGION` | `us-east-1` | Queue region. |
-| `AWS_ACCESS_KEY_ID` | required | Queue credentials. |
-| `AWS_SECRET_ACCESS_KEY` | required | Queue credentials. |
-| `QUEUE_NAME` | `pgland-sync` | Main sync queue. |
-| `DLQ_NAME` | `pgland-sync-dlq` | Dead-letter queue. |
-| `QUEUE_VISIBILITY_SECONDS` | `60` | How long a received run stays hidden. |
+Settings, defaults, and required variables are in [`.env.example`](.env.example).
 
-The schema is `internal/store/schema.sql`, applied on every start with `CREATE TABLE IF NOT EXISTS`. Query `raw_events` directly from any SQL or BI tool.
+The schema is [`internal/store/schema.sql`](internal/store/schema.sql), applied on every start with `CREATE TABLE IF NOT EXISTS`. Query `raw_events` directly from any SQL or BI tool.
 
 ## Development
 
 ```bash
-make db-up
 make test   # store tests run when DATABASE_URL is set
 make build  # ./bin/pgland
 ```

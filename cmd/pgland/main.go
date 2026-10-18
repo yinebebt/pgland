@@ -7,15 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
-	"github.com/yinebebt/pgland/internal/config"
 	"github.com/yinebebt/pgland/internal/httpapi"
-	"github.com/yinebebt/pgland/internal/source"
-	"github.com/yinebebt/pgland/internal/sqsqueue"
-	"github.com/yinebebt/pgland/internal/store"
 )
 
 var version = "0.1.0"
@@ -35,50 +29,31 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load()
+	rt, err := newRuntime()
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	slog.SetDefault(log)
+	defer rt.close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	rt.log.Info("sources loaded", "file", rt.cfg.SourcesFile, "count", len(rt.sources))
 
-	defs, err := source.Load(cfg.SourcesFile)
-	if err != nil {
-		return err
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	pullers := make([]httpapi.Puller, 0, len(defs))
-	for _, def := range defs {
-		pullers = append(pullers, source.New(def, client))
-	}
-	log.Info("sources loaded", "file", cfg.SourcesFile, "count", len(pullers))
-
-	st, err := store.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	q, err := openQueue(ctx, cfg)
-	if err != nil {
-		return err
+	if rt.cfg.IngestSecret == "" {
+		rt.log.Warn("INGEST_SECRET is empty; POST /events accepts unsigned requests")
 	}
 
-	if cfg.IngestSecret == "" {
-		log.Warn("INGEST_SECRET is empty; POST /events accepts unsigned requests")
+	pullers := make([]httpapi.Puller, 0, len(rt.sources))
+	for _, src := range rt.sources {
+		pullers = append(pullers, src)
 	}
 
 	srv := &http.Server{
-		Addr: cfg.HTTPAddr,
+		Addr: rt.cfg.HTTPAddr,
 		Handler: httpapi.Handler(httpapi.Config{
-			Log:          log,
-			Store:        st,
-			Queue:        q,
+			Log:          rt.log,
+			Store:        rt.store,
+			Queue:        rt.queue,
 			Sources:      pullers,
-			IngestSecret: cfg.IngestSecret,
+			IngestSecret: rt.cfg.IngestSecret,
 			Version:      version,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -86,7 +61,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("http listening", "addr", cfg.HTTPAddr, "version", version)
+		rt.log.Info("http listening", "addr", rt.cfg.HTTPAddr, "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
@@ -95,26 +70,14 @@ func run() error {
 	select {
 	case err := <-serveErr:
 		return err
-	case <-ctx.Done():
+	case <-rt.ctx.Done():
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), rt.cfg.ShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
-	log.Info("shutdown complete")
+	rt.log.Info("shutdown complete")
 	return nil
-}
-
-func openQueue(ctx context.Context, cfg config.Config) (*sqsqueue.Queue, error) {
-	return sqsqueue.Open(ctx, sqsqueue.Config{
-		Endpoint:          cfg.QueueEndpoint,
-		Region:            cfg.QueueRegion,
-		AccessKey:         cfg.QueueAccessKey,
-		SecretKey:         cfg.QueueSecretKey,
-		QueueName:         cfg.QueueName,
-		DLQName:           cfg.DLQName,
-		VisibilitySeconds: cfg.QueueVisibility,
-	})
 }

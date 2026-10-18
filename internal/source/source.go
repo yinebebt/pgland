@@ -1,7 +1,8 @@
 // Package source pulls events from HTTP JSON APIs described in a config file.
 //
-// Each Fetch reads one page. Paging follows the response's Link rel="next"
-// header (RFC 8288), and the next URL is the cursor saved for the next sync.
+// Each Fetch reads one batch. For this source a batch is one response page.
+// Paging follows the response's Link rel="next" header (RFC 8288), and the
+// next page URL is the cursor saved for the next sync.
 package source
 
 import (
@@ -81,8 +82,9 @@ func (c Config) validate() error {
 	return nil
 }
 
-// Page is one fetched page. Next is the cursor for the following Fetch.
-type Page struct {
+// Batch is one fetch: the records read and the cursor for the following Fetch.
+// Next is the next page URL, or the fetched URL when the response has no next link.
+type Batch struct {
 	Records []event.Record
 	Next    string
 }
@@ -103,33 +105,33 @@ func New(cfg Config, client *http.Client) *HTTP {
 // Name returns the configured source name.
 func (h *HTTP) Name() string { return h.cfg.Name }
 
-// Fetch reads the page at cursor, or the configured URL when cursor is empty.
+// Fetch reads one batch at cursor, or the configured URL when cursor is empty.
 // Without a next link, Next repeats the fetched URL so the following sync
 // picks up anything appended to the last page.
-func (h *HTTP) Fetch(ctx context.Context, cursor string) (Page, error) {
+func (h *HTTP) Fetch(ctx context.Context, cursor string) (Batch, error) {
 	target := h.cfg.URL
 	if cursor != "" {
 		target = cursor
 	}
 	u, err := url.Parse(target)
 	if err != nil || !h.sameOrigin(u) {
-		return Page{}, fmt.Errorf("cursor is not on %s", h.origin.Host)
+		return Batch{}, fmt.Errorf("cursor is not on %s", h.origin.Host)
 	}
 
 	body, header, err := h.get(ctx, u)
 	if err != nil {
-		return Page{}, err
+		return Batch{}, err
 	}
 	recs, err := h.parse(body)
 	if err != nil {
-		return Page{}, err
+		return Batch{}, err
 	}
 
 	next := target
 	if link := nextLink(header.Values("Link"), u); link != nil && h.sameOrigin(link) {
 		next = link.String()
 	}
-	return Page{Records: recs, Next: next}, nil
+	return Batch{Records: recs, Next: next}, nil
 }
 
 func (h *HTTP) get(ctx context.Context, u *url.URL) ([]byte, http.Header, error) {
