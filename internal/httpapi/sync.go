@@ -37,7 +37,7 @@ func (a *api) listSources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sources": views})
 }
 
-// sync accepts one page fetch. The worker performs it and the caller reads the run.
+// sync accepts one batch. The worker fetches it and the caller reads the run.
 func (a *api) sync(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if _, ok := a.sources[name]; !ok {
@@ -53,7 +53,8 @@ func (a *api) sync(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, http.StatusInternalServerError, "accept sync failed", err)
 		return
 	}
-	if err := a.store.AcceptSync(r.Context(), id, name); err != nil {
+	acceptedAt, err := a.store.AcceptSync(r.Context(), id, name)
+	if err != nil {
 		if errors.Is(err, store.ErrSyncInProgress) {
 			a.fail(w, r, http.StatusConflict, "sync already running", nil)
 			return
@@ -69,13 +70,13 @@ func (a *api) sync(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, http.StatusBadGateway, "enqueue sync failed", err)
 		return
 	}
-	run, err := a.store.GetSync(r.Context(), id)
-	if err != nil {
-		a.fail(w, r, http.StatusInternalServerError, "read sync failed", err)
-		return
-	}
 	a.log.InfoContext(r.Context(), "sync accepted", "source", name, "run", id)
-	writeJSON(w, http.StatusAccepted, run)
+	writeJSON(w, http.StatusAccepted, store.SyncRun{
+		ID:         id,
+		Source:     name,
+		Status:     store.SyncAccepted,
+		AcceptedAt: acceptedAt,
+	})
 }
 
 func (a *api) getSync(w http.ResponseWriter, r *http.Request) {

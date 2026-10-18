@@ -1,4 +1,4 @@
-// Package syncjob performs one accepted pull: read the cursor, fetch a page, store it.
+// Package syncjob performs one accepted pull: read the cursor, fetch one batch, store it.
 package syncjob
 
 import (
@@ -16,11 +16,11 @@ type Store interface {
 	FinishSync(ctx context.Context, id string, fetched int) error
 }
 
-// Fetch loads one page. cursor is the previous page's next URL, or "" at the start.
-type Fetch func(ctx context.Context, cursor string) (source.Page, error)
+// Fetch loads one batch. cursor is the cursor saved by the previous batch, or "" at the start.
+type Fetch func(ctx context.Context, cursor string) (source.Batch, error)
 
 // Run finishes an accepted sync run. A run that is not accepted is a no-op,
-// so a redelivered queue message does not fetch the page again.
+// so a redelivered queue message does not fetch the batch again.
 func Run(ctx context.Context, st Store, fetch Fetch, run store.SyncRun) error {
 	if run.Status != store.SyncAccepted {
 		return nil
@@ -29,12 +29,12 @@ func Run(ctx context.Context, st Store, fetch Fetch, run store.SyncRun) error {
 	if err != nil {
 		return err
 	}
-	page, err := fetch(ctx, cursor)
+	batch, err := fetch(ctx, cursor)
 	if err != nil {
 		return err
 	}
-	if err := st.SaveSync(ctx, run.Source, page.Records, page.Next); err != nil {
+	if err := st.SaveSync(ctx, run.Source, batch.Records, batch.Next); err != nil {
 		return err
 	}
-	return st.FinishSync(ctx, run.ID, len(page.Records))
+	return st.FinishSync(ctx, run.ID, len(batch.Records))
 }

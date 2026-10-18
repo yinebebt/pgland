@@ -84,25 +84,25 @@ func TestFetchFollowsLinkHeader(t *testing.T) {
 		TimeLayout:  "20060102",
 	}, srv.Client())
 
-	page, err := h.Fetch(context.Background(), "")
+	batch, err := h.Fetch(context.Background(), "")
 	if err != nil {
 		t.Fatalf("first fetch: %v", err)
 	}
-	if len(page.Records) != 2 || page.Records[0].ExternalID != "a" || page.Records[1].ExternalID != "2" {
-		t.Fatalf("records = %+v", page.Records)
+	if len(batch.Records) != 2 || batch.Records[0].ExternalID != "a" || batch.Records[1].ExternalID != "2" {
+		t.Fatalf("records = %+v", batch.Records)
 	}
-	if !page.Records[0].OccurredAt.Equal(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)) {
-		t.Fatalf("occurred_at = %s", page.Records[0].OccurredAt)
+	if !batch.Records[0].OccurredAt.Equal(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("occurred_at = %s", batch.Records[0].OccurredAt)
 	}
-	if page.Next != srv.URL+"/feed?page=2" {
-		t.Fatalf("next = %q", page.Next)
+	if batch.Next != srv.URL+"/feed?page=2" {
+		t.Fatalf("next = %q", batch.Next)
 	}
 
-	last, err := h.Fetch(context.Background(), page.Next)
+	last, err := h.Fetch(context.Background(), batch.Next)
 	if err != nil {
 		t.Fatalf("second fetch: %v", err)
 	}
-	if len(last.Records) != 1 || last.Next != page.Next {
+	if len(last.Records) != 1 || last.Next != batch.Next {
 		t.Fatalf("last page = %+v", last)
 	}
 }

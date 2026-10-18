@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/yinebebt/pgland/internal/event"
-	"github.com/yinebebt/pgland/internal/source"
 	"github.com/yinebebt/pgland/internal/store"
 )
 
@@ -18,7 +18,7 @@ type Store interface {
 	Ping(ctx context.Context) error
 	Save(ctx context.Context, recs []event.Record) error
 	SyncStates(ctx context.Context) ([]store.SyncState, error)
-	AcceptSync(ctx context.Context, id, source string) error
+	AcceptSync(ctx context.Context, id, source string) (time.Time, error)
 	GetSync(ctx context.Context, id string) (store.SyncRun, error)
 	FailSync(ctx context.Context, id, reason string) error
 	Events(ctx context.Context, f store.Filter) ([]store.Event, error)
@@ -30,10 +30,10 @@ type Enqueuer interface {
 	Enqueue(ctx context.Context, runID string) error
 }
 
-// Puller fetches one page of a pull source.
+// Puller is a configured pull source. The API uses the name to accept a sync.
+// The worker fetches batches. This handler does not.
 type Puller interface {
 	Name() string
-	Fetch(ctx context.Context, cursor string) (source.Page, error)
 }
 
 // Config wires the handler.

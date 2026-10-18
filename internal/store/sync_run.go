@@ -21,7 +21,7 @@ var (
 	ErrSyncNotFound   = errors.New("sync run not found")
 )
 
-// SyncRun is one accepted page fetch and, later, its finished or failed result.
+// SyncRun is one accepted batch and, later, its finished or failed result.
 type SyncRun struct {
 	ID         string     `json:"id"`
 	Source     string     `json:"source"`
@@ -32,20 +32,23 @@ type SyncRun struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
-// AcceptSync inserts one accepted run. A second accepted run for the same source is rejected.
-func (s *Store) AcceptSync(ctx context.Context, id, source string) error {
-	_, err := s.pool.Exec(ctx, `
+// AcceptSync inserts one accepted run and returns the time the row was stored.
+// A second accepted run for the same source is rejected.
+func (s *Store) AcceptSync(ctx context.Context, id, source string) (time.Time, error) {
+	var acceptedAt time.Time
+	err := s.pool.QueryRow(ctx, `
 		INSERT INTO sync_runs (id, source, status)
 		VALUES ($1, $2, 'accepted')
-	`, id, source)
+		RETURNING accepted_at
+	`, id, source).Scan(&acceptedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return ErrSyncInProgress
+		return time.Time{}, ErrSyncInProgress
 	}
 	if err != nil {
-		return fmt.Errorf("accept sync: %w", err)
+		return time.Time{}, fmt.Errorf("accept sync: %w", err)
 	}
-	return nil
+	return acceptedAt, nil
 }
 
 // GetSync returns one run.

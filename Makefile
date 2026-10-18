@@ -1,4 +1,4 @@
-.PHONY: run build test tidy db-up db-down
+.PHONY: run worker build test
 
 VERSION ?= 0.1.0
 
@@ -10,6 +10,9 @@ endif
 run:
 	go run ./cmd/pgland
 
+worker:
+	go run ./cmd/pgland worker
+
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/pgland ./cmd/pgland
 
@@ -17,12 +20,3 @@ build:
 test:
 	go test -race ./...
 
-tidy:
-	go mod tidy
-
-db-up:
-	docker compose up -d --wait
-
-# Keeps the data volume.
-db-down:
-	docker compose down

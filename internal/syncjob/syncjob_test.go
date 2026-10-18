@@ -34,10 +34,10 @@ func (m *mem) FinishSync(_ context.Context, id string, fetched int) error {
 func TestRunResumesCursorAndSkipsAFinishedRun(t *testing.T) {
 	m := &mem{run: store.SyncRun{ID: "run-1", Source: "openfda", Status: store.SyncAccepted}}
 	var asked []string
-	fetch := func(_ context.Context, cursor string) (source.Page, error) {
+	fetch := func(_ context.Context, cursor string) (source.Batch, error) {
 		asked = append(asked, cursor)
 		n := len(asked)
-		return source.Page{
+		return source.Batch{
 			Records: []event.Record{{
 				Source: "openfda", ExternalID: "r" + string(rune('0'+n)), EventType: "adverse_event",
 				Payload: []byte(`{}`),
@@ -63,8 +63,8 @@ func TestRunResumesCursorAndSkipsAFinishedRun(t *testing.T) {
 
 func TestRunLeavesCursorWhenFetchFails(t *testing.T) {
 	m := &mem{run: store.SyncRun{ID: "run-1", Source: "openfda", Status: store.SyncAccepted}, cursor: "page-1"}
-	err := Run(context.Background(), m, func(context.Context, string) (source.Page, error) {
-		return source.Page{}, errors.New("openfda unavailable")
+	err := Run(context.Background(), m, func(context.Context, string) (source.Batch, error) {
+		return source.Batch{}, errors.New("openfda unavailable")
 	}, m.run)
 	if err == nil {
 		t.Fatal("expected fetch error")
